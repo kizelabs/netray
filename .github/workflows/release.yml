@@ -1,0 +1,55 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # arm64 runner; the x86_64 half of the universal binary is cross-compiled.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both the dispatch input and the tag name are attacker-influenced text,
+      # so they go through env rather than being interpolated into the shell,
+      # and are validated before use.
+      - name: Resolve version
+        id: v
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="${REF_NAME#v}"
+          fi
+          case "$VERSION" in
+            *[!0-9.]*|""|.*|*.) echo "Refusing malformed version: $VERSION" >&2; exit 1 ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build bundle
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          chmod +x scripts/bundle.sh
+          ./scripts/bundle.sh "$VERSION"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: v${{ steps.v.outputs.version }}
+          files: dist/NeTray-macos-universal.tar.gz
+          generate_release_notes: true
