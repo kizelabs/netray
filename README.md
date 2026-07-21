@@ -1,13 +1,21 @@
 # NeTray
 
 A lightweight macOS menu bar network monitor. Live upload and download
-throughput in your status bar, with session totals, peak speeds, and a
-per-interface breakdown in the dropdown.
+throughput in your status bar, with a per-app breakdown, session totals,
+peak speeds, and per-interface stats in the dropdown.
 
 ```
 ↑ 4.0K/s
 ↓ 6.0K/s
 ```
+
+The throughput value is colored by magnitude for an at-a-glance read —
+green for K/s, amber for M/s, red for G/s (and a muted gray when idle).
+Colors adapt to a light or dark menu bar.
+
+Clicking the menu bar item lists the apps currently using the network
+(top 10 by throughput, down/up each), sampled from macOS's built-in
+`nettop` — no elevated privileges required.
 
 ## Install
 

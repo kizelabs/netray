@@ -1,12 +1,15 @@
+mod app_monitor;
 mod icon;
 mod monitor;
 mod tray_title;
 
+use std::cell::RefCell;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use app_monitor::AppUsage;
 use bytesize::ByteSize;
 use monitor::{InterfaceStats, NetworkMonitor};
 use tray_icon::{
@@ -23,6 +26,9 @@ enum UserEvent {
     Refresh,
 }
 
+/// How many apps to list in the dropdown.
+const MAX_APPS: usize = 10;
+
 #[derive(Debug, Clone, Default)]
 struct NetworkState {
     recv_speed: u64,
@@ -37,6 +43,7 @@ struct AppState {
     peak_recv: u64,
     peak_sent: u64,
     network: NetworkState,
+    apps: Vec<AppUsage>,
 }
 
 impl AppState {
@@ -61,12 +68,29 @@ struct MenuItems {
     total_sent: MenuItem,
     peak_recv: MenuItem,
     peak_sent: MenuItem,
+    /// Handle to the root menu, kept so the per-app rows can be rebuilt inline
+    /// (muda's Menu is a cheap Rc-backed handle, so this shares the same menu).
+    menu: Menu,
+    /// Index at which the dynamic app rows are (re)inserted, just below the
+    /// "Active apps" header.
+    app_rows_index: usize,
+    app_rows: RefCell<Vec<MenuItem>>,
+    /// Signature of the currently-rendered app rows, so the main menu is only
+    /// mutated when the list actually changes rather than every UI tick.
+    app_rows_sig: RefCell<u64>,
 }
 
 fn build_menu() -> Result<(Menu, MenuItems)> {
     let menu = Menu::new();
     let header = MenuItem::new("NeTray — Network Monitor", false, None);
     menu.append(&header)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+
+    // Inline "Active apps" section. The rows themselves are inserted at
+    // app_rows_index each refresh; the header and trailing separator are static.
+    let activity_header = MenuItem::new("Active apps  (↓ down  ↑ up)", false, None);
+    menu.append(&activity_header)?;
+    let app_rows_index = menu.items().len(); // rows go right after the header
     menu.append(&PredefinedMenuItem::separator())?;
 
     let recv_speed = MenuItem::new("↓ 0 B/s", false, None);
@@ -108,6 +132,10 @@ fn build_menu() -> Result<(Menu, MenuItems)> {
         total_sent,
         peak_recv,
         peak_sent,
+        menu: menu.clone(),
+        app_rows_index,
+        app_rows: RefCell::new(Vec::new()),
+        app_rows_sig: RefCell::new(u64::MAX),
     };
     Ok((menu, items))
 }
@@ -130,8 +158,10 @@ fn main() -> Result<()> {
     let _ = tray_icon.set_icon(None);
 
     let (tx, rx) = mpsc::channel::<NetworkState>();
+    let (apps_tx, apps_rx) = mpsc::channel::<Vec<AppUsage>>();
     spawn_timer_thread(event_loop.create_proxy());
     spawn_monitor_thread(tx);
+    spawn_app_monitor_thread(apps_tx);
 
     let mut state = AppState::default();
     let mut last_ui = Instant::now() - REFRESH_INTERVAL;
@@ -151,6 +181,11 @@ fn main() -> Result<()> {
             winit::event::Event::UserEvent(UserEvent::Refresh) => {
                 if let Ok(snapshot) = rx.try_recv() {
                     state.update(&snapshot);
+                }
+                // The app sampler runs on its own (slower) cadence; take the
+                // latest result if one has arrived.
+                while let Ok(apps) = apps_rx.try_recv() {
+                    state.apps = apps;
                 }
             }
             winit::event::Event::AboutToWait => {
@@ -175,6 +210,7 @@ fn apply_to_ui(state: &AppState, items: &MenuItems, tray: &tray_icon::TrayIcon) 
     let _ = items.peak_sent.set_text(&format!("Peak ↑ {}/s", ByteSize(state.peak_sent)));
 
     rebuild_interfaces_submenu(&items.interfaces_sub, &state.network.interfaces);
+    rebuild_app_rows(items, &state.apps);
 
     let recv_str = format_speed_bytes(state.network.recv_speed);
     let sent_str = format_speed_bytes(state.network.sent_speed);
@@ -264,6 +300,75 @@ fn rebuild_interfaces_submenu(sub: &Submenu, interfaces: &[(String, InterfaceSta
     }
 }
 
+/// Rebuild the inline per-app rows in place: remove the previous set, insert
+/// the current one right below the "Active apps" header. Follows the same
+/// remove/insert pattern the interfaces submenu uses.
+fn rebuild_app_rows(items: &MenuItems, apps: &[AppUsage]) {
+    // Skip the mutation entirely when the list is unchanged since last render.
+    let sig = apps_signature(apps);
+    if *items.app_rows_sig.borrow() == sig {
+        return;
+    }
+    *items.app_rows_sig.borrow_mut() = sig;
+
+    let mut rows = items.app_rows.borrow_mut();
+    for row in rows.iter() {
+        let _ = items.menu.remove(row);
+    }
+    rows.clear();
+
+    if apps.is_empty() {
+        let placeholder = MenuItem::new("  (no active connections)", false, None);
+        let _ = items.menu.insert(&placeholder, items.app_rows_index);
+        rows.push(placeholder);
+        return;
+    }
+
+    for (offset, app) in apps.iter().enumerate() {
+        let label = format!(
+            "{:<16}  ↓ {:>8}  ↑ {:>8}",
+            truncate_name(&app.name, 16),
+            format!("{}/s", format_speed_bytes(app.recv_speed)),
+            format!("{}/s", format_speed_bytes(app.sent_speed)),
+        );
+        let row = MenuItem::new(&label, false, None);
+        let _ = items.menu.insert(&row, items.app_rows_index + offset);
+        rows.push(row);
+    }
+}
+
+/// FNV-1a hash over the app list's names and rounded speeds. Used only to
+/// detect whether the rendered rows would change.
+fn apps_signature(apps: &[AppUsage]) -> u64 {
+    fn mix(h: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
+        let mut h = h;
+        for byte in bytes {
+            h ^= byte as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+    let mut h: u64 = 0xcbf29ce484222325;
+    for a in apps {
+        h = mix(h, a.name.bytes());
+        h = mix(h, a.recv_speed.to_le_bytes());
+        h = mix(h, a.sent_speed.to_le_bytes());
+    }
+    h
+}
+
+/// Clamp a process name to `width` chars, ellipsizing the overflow.
+fn truncate_name(name: &str, width: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= width {
+        name.to_string()
+    } else {
+        let mut s: String = chars[..width.saturating_sub(1)].iter().collect();
+        s.push('…');
+        s
+    }
+}
+
 fn short_name(name: &str) -> &str {
     if let Some(idx) = name.find(':') {
         &name[..idx]
@@ -280,6 +385,20 @@ fn spawn_timer_thread(proxy: EventLoopProxy<UserEvent>) {
                 break;
             }
         }
+    });
+}
+
+/// Samples per-app network usage on its own cadence. Each `sample_top_apps`
+/// call blocks ~1s+ inside nettop, so this must stay off the network/UI threads.
+fn spawn_app_monitor_thread(tx: Sender<Vec<AppUsage>>) {
+    thread::spawn(move || loop {
+        let apps = app_monitor::sample_top_apps(MAX_APPS);
+        if tx.send(apps).is_err() {
+            break;
+        }
+        // nettop already imposed ~1s between its two samples; a small extra
+        // pause keeps the process spawn rate modest.
+        thread::sleep(Duration::from_secs(2));
     });
 }
 
