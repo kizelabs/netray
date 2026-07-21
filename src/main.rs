@@ -1,4 +1,5 @@
 mod app_monitor;
+mod app_rows;
 mod icon;
 mod monitor;
 mod tray_title;
@@ -13,7 +14,7 @@ use app_monitor::AppUsage;
 use bytesize::ByteSize;
 use monitor::{InterfaceStats, NetworkMonitor};
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     TrayIconBuilder,
 };
 use winit::event_loop::{EventLoop, EventLoopProxy};
@@ -68,14 +69,13 @@ struct MenuItems {
     total_sent: MenuItem,
     peak_recv: MenuItem,
     peak_sent: MenuItem,
-    /// Handle to the root menu, kept so the per-app rows can be rebuilt inline
-    /// (muda's Menu is a cheap Rc-backed handle, so this shares the same menu).
+    /// Handle to the root menu, kept so its underlying NSMenu can be reached
+    /// (via ns_menu()) to insert the native app rows.
     menu: Menu,
-    /// Index at which the dynamic app rows are (re)inserted, just below the
+    /// NSMenu index at which the app rows are (re)inserted, just below the
     /// "Active apps" header.
     app_rows_index: usize,
-    app_rows: RefCell<Vec<MenuItem>>,
-    /// Signature of the currently-rendered app rows, so the main menu is only
+    /// Signature of the currently-rendered app rows, so the menu is only
     /// mutated when the list actually changes rather than every UI tick.
     app_rows_sig: RefCell<u64>,
 }
@@ -134,7 +134,6 @@ fn build_menu() -> Result<(Menu, MenuItems)> {
         peak_sent,
         menu: menu.clone(),
         app_rows_index,
-        app_rows: RefCell::new(Vec::new()),
         app_rows_sig: RefCell::new(u64::MAX),
     };
     Ok((menu, items))
@@ -246,7 +245,7 @@ fn pad_title(s: &str) -> String {
     out
 }
 
-fn format_speed_bytes(bps: u64) -> String {
+pub(crate) fn format_speed_bytes(bps: u64) -> String {
     let k = bps as f64 / 1024.0;
     if k < 1.0 {
         "0K".to_string()
@@ -300,41 +299,15 @@ fn rebuild_interfaces_submenu(sub: &Submenu, interfaces: &[(String, InterfaceSta
     }
 }
 
-/// Rebuild the inline per-app rows in place: remove the previous set, insert
-/// the current one right below the "Active apps" header. Follows the same
-/// remove/insert pattern the interfaces submenu uses.
+/// Rebuild the native per-app rows, skipping the work when the list is
+/// unchanged since last render (so the menu isn't mutated every UI tick).
 fn rebuild_app_rows(items: &MenuItems, apps: &[AppUsage]) {
-    // Skip the mutation entirely when the list is unchanged since last render.
     let sig = apps_signature(apps);
     if *items.app_rows_sig.borrow() == sig {
         return;
     }
     *items.app_rows_sig.borrow_mut() = sig;
-
-    let mut rows = items.app_rows.borrow_mut();
-    for row in rows.iter() {
-        let _ = items.menu.remove(row);
-    }
-    rows.clear();
-
-    if apps.is_empty() {
-        let placeholder = MenuItem::new("  (no active connections)", false, None);
-        let _ = items.menu.insert(&placeholder, items.app_rows_index);
-        rows.push(placeholder);
-        return;
-    }
-
-    for (offset, app) in apps.iter().enumerate() {
-        let label = format!(
-            "{:<16}  ↓ {:>8}  ↑ {:>8}",
-            truncate_name(&app.name, 16),
-            format!("{}/s", format_speed_bytes(app.recv_speed)),
-            format!("{}/s", format_speed_bytes(app.sent_speed)),
-        );
-        let row = MenuItem::new(&label, false, None);
-        let _ = items.menu.insert(&row, items.app_rows_index + offset);
-        rows.push(row);
-    }
+    app_rows::render(items.menu.ns_menu(), items.app_rows_index, apps);
 }
 
 /// FNV-1a hash over the app list's names and rounded speeds. Used only to
@@ -355,18 +328,6 @@ fn apps_signature(apps: &[AppUsage]) -> u64 {
         h = mix(h, a.sent_speed.to_le_bytes());
     }
     h
-}
-
-/// Clamp a process name to `width` chars, ellipsizing the overflow.
-fn truncate_name(name: &str, width: usize) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() <= width {
-        name.to_string()
-    } else {
-        let mut s: String = chars[..width.saturating_sub(1)].iter().collect();
-        s.push('…');
-        s
-    }
 }
 
 fn short_name(name: &str) -> &str {

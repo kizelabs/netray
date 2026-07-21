@@ -13,9 +13,11 @@ The throughput value is colored by magnitude for an at-a-glance read —
 green for K/s, amber for M/s, red for G/s (and a muted gray when idle).
 Colors adapt to a light or dark menu bar.
 
-Clicking the menu bar item lists the apps currently using the network
-(top 10 by throughput, down/up each), sampled from macOS's built-in
-`nettop` — no elevated privileges required.
+Clicking the menu bar item shows a compact table of the apps currently
+using the network (top 10 by throughput) — app name on the left,
+download and upload right-aligned in their own columns, each colored by
+magnitude. Sampled from macOS's built-in `nettop`, no elevated
+privileges required.
 
 ## Install
 
