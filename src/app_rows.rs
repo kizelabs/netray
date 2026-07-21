@@ -31,11 +31,13 @@ thread_local! {
 }
 
 const ROW_FONT_SIZE: f64 = 12.0;
-/// Right edges (points from the item's left) of the two number columns.
-const TAB_DOWN: f64 = 236.0;
+/// Right edges (points from the item's left) of the two number columns. Both
+/// the header labels and the values right-align to these, so the columns line
+/// up. Sized to clear a ~24-char name plus the "Download" header label.
+const TAB_DOWN: f64 = 250.0;
 const TAB_UP: f64 = 330.0;
-/// Names are already capped ~15 chars by nettop; this is a safety net.
-const NAME_MAX: usize = 22;
+/// Max app-name length before ellipsizing.
+const NAME_MAX: usize = 24;
 
 /// Rebuild the app rows in `ns_menu` (a `*mut NSMenu` from `Menu::ns_menu()`),
 /// inserting them starting at `base_index`, just after the section header.
@@ -57,15 +59,16 @@ pub fn render(ns_menu: *mut c_void, base_index: usize, apps: &[AppUsage]) {
         });
 
         let dark = app_is_dark();
-        let new_rows: Vec<Retained<NSMenuItem>> = if apps.is_empty() {
-            vec![make_row(
-                "  (no active connections)",
-                &[(0, 25, secondary_label())],
-                mtm,
-            )]
+        // The header uses the same tab-stop columns as the rows, so "Download"
+        // / "Upload" sit directly above their values.
+        let mut new_rows: Vec<Retained<NSMenuItem>> = vec![make_header(mtm)];
+        if apps.is_empty() {
+            let placeholder = "  (no active connections)";
+            let len = placeholder.chars().count();
+            new_rows.push(make_row(placeholder, &[(0, len, secondary_label())], true, mtm));
         } else {
-            apps.iter().map(|a| make_app_row(a, dark, mtm)).collect()
-        };
+            new_rows.extend(apps.iter().map(|a| make_app_row(a, dark, mtm)));
+        }
 
         for (offset, item) in new_rows.iter().enumerate() {
             menu.insertItem_atIndex(item, (base_index + offset) as isize);
@@ -74,14 +77,33 @@ pub fn render(ns_menu: *mut c_void, base_index: usize, apps: &[AppUsage]) {
     }
 }
 
+/// Column header, laid out on the same tab stops as the data rows.
+unsafe fn make_header(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    let text = "App\tDownload\tUpload";
+    let app_len = 3;
+    let down_len = "Download".chars().count();
+    let down_start = app_len + 1;
+    let up_start = down_start + down_len + 1;
+    let up_len = "Upload".chars().count();
+    let colors = [
+        (0, app_len, label()),
+        (down_start, down_len, label()),
+        (up_start, up_len, label()),
+    ];
+    // Disabled so it reads as a dimmed header and isn't highlightable.
+    make_row(text, &colors, false, mtm)
+}
+
 unsafe fn make_app_row(app: &AppUsage, dark: bool, mtm: MainThreadMarker) -> Retained<NSMenuItem> {
     let name = truncate(&app.name, NAME_MAX);
-    let down = format!("↓ {}/s", crate::format_speed_bytes(app.recv_speed));
-    let up = format!("↑ {}/s", crate::format_speed_bytes(app.sent_speed));
+    // No arrow or "/s": the columns are labeled by the header, and the unit
+    // letter (K/M/G) already conveys magnitude.
+    let down = crate::format_speed_bytes(app.recv_speed);
+    let up = crate::format_speed_bytes(app.sent_speed);
     let text = format!("{}\t{}\t{}", name, down, up);
 
     // Column ranges, in UTF-16 units. Every glyph here is in the BMP (letters,
-    // digits, arrows, tab), so char count == UTF-16 length.
+    // digits, tab), so char count == UTF-16 length.
     let name_len = name.chars().count();
     let down_start = name_len + 1; // past the '\t'
     let down_len = down.chars().count();
@@ -93,7 +115,7 @@ unsafe fn make_app_row(app: &AppUsage, dark: bool, mtm: MainThreadMarker) -> Ret
         (down_start, down_len, magnitude_color(&down, dark)),
         (up_start, up_len, magnitude_color(&up, dark)),
     ];
-    make_row(&text, &colors, mtm)
+    make_row(&text, &colors, true, mtm)
 }
 
 /// Build a menu item whose attributed title uses our monospaced font, the two
@@ -102,6 +124,7 @@ unsafe fn make_app_row(app: &AppUsage, dark: bool, mtm: MainThreadMarker) -> Ret
 unsafe fn make_row(
     text: &str,
     colors: &[(usize, usize, *mut AnyObject)],
+    enabled: bool,
     mtm: MainThreadMarker,
 ) -> Retained<NSMenuItem> {
     let ns_text = NSString::from_str(text);
@@ -145,17 +168,17 @@ unsafe fn make_row(
         &empty_key,
     );
     let _: () = msg_send![&*item, setAttributedTitle: attr];
-    // Enabled so the colors render at full strength (muda disabled auto-enable);
-    // no action, so a click just dismisses the menu.
-    item.setEnabled(true);
+    // Data rows stay enabled so their colors render at full strength (muda
+    // turned off auto-enable); the header passes false to read as dimmed.
+    item.setEnabled(enabled);
     item
 }
 
-/// "849K/s" / "0K" -> a magnitude color. Ramps calm -> hot with the unit, and
+/// "849K" / "0K" -> a magnitude color. Ramps calm -> hot with the unit, and
 /// dims to gray when the value is zero. Mirrors the menu bar title palette.
 unsafe fn magnitude_color(s: &str, dark: bool) -> *mut AnyObject {
     let unit = s.chars().find(|c| matches!(c, 'K' | 'M' | 'G'));
-    let is_zero = s.contains(" 0K") || s.contains("↓ 0K") || s.contains("↑ 0K");
+    let is_zero = s == "0K";
     let (r, g, b) = match (unit, is_zero, dark) {
         (_, true, true) => (0.60, 0.62, 0.66),
         (_, true, false) => (0.42, 0.44, 0.48),

@@ -86,11 +86,10 @@ fn build_menu() -> Result<(Menu, MenuItems)> {
     menu.append(&header)?;
     menu.append(&PredefinedMenuItem::separator())?;
 
-    // Inline "Active apps" section. The rows themselves are inserted at
-    // app_rows_index each refresh; the header and trailing separator are static.
-    let activity_header = MenuItem::new("Active apps  (↓ down  ↑ up)", false, None);
-    menu.append(&activity_header)?;
-    let app_rows_index = menu.items().len(); // rows go right after the header
+    // "Active apps" section. Its header and rows are all native NSMenuItems
+    // (for color + columns), inserted at app_rows_index each refresh. Only the
+    // trailing separator is a static muda item.
+    let app_rows_index = menu.items().len();
     menu.append(&PredefinedMenuItem::separator())?;
 
     let recv_speed = MenuItem::new("↓ 0 B/s", false, None);
