@@ -10,6 +10,10 @@
 	<string>com.kizelabs.netray</string>
 	<key>CFBundleExecutable</key>
 	<string>netray</string>
+	<key>CFBundleIconFile</key>
+	<string>NeTray</string>
+	<key>CFBundleIconName</key>
+	<string>NeTray</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleInfoDictionaryVersion</key>

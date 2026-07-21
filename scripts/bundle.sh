@@ -27,6 +27,7 @@ lipo -create -output "$APP/Contents/MacOS/netray" \
 chmod +x "$APP/Contents/MacOS/netray"
 
 sed "s/__VERSION__/$VERSION/g" packaging/Info.plist > "$APP/Contents/Info.plist"
+cp packaging/NeTray.icns "$APP/Contents/Resources/NeTray.icns"
 
 # Ad-hoc signature. This is not Apple notarization -- it does not stop
 # Gatekeeper warnings for browser downloads -- but it gives the bundle a
